@@ -1,3 +1,5 @@
+// Copyright © 2025 William Gacquer — tous droits réservés
+
 use anyhow::{Context, Result, anyhow, bail};
 use encoding_rs::WINDOWS_1252;
 use serde::Serialize;
@@ -53,27 +55,34 @@ pub struct Rss {
     pub num_rum: String,            // 68-77
 
     // Patient
-    pub date_naissance: String,        // 78-85  (JJMMAAAA)
-    pub sexe: String,                  // 86     (1=H, 2=F, 3=indéterminé)
-    pub num_um: String,                // 87-90
+    pub date_naissance: String, // 78-85  (JJMMAAAA)
+    pub sexe: String,           // 86     (1=H, 2=F, 3=indéterminé)
+    pub num_um: String,         // 87-90
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub type_autorisation_lit: String, // 91-92
 
     // Entrée dans l'UM
     pub date_entree: String, // 93-100 (JJMMAAAA)
     pub mode_entree: String, // 101
-    pub provenance: String,  // 102
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub provenance: String, // 102
 
     // Sortie de l'UM
     pub date_sortie: String, // 103-110 (JJMMAAAA)
     pub mode_sortie: String, // 111
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub destination: String, // 112
 
     // Divers
-    pub code_postal: String,      // 113-117
-    pub poids_naissance: String,  // 118-121 (grammes, 0000 si absent)
+    pub code_postal: String, // 113-117
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub poids_naissance: String, // 118-121 (grammes)
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub age_gestationnel: String, // 122-123 (semaines)
-    pub date_ddr: String,         // 124-131 (JJMMAAAA)
-    pub nb_seances: String,       // 132-133
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub date_ddr: String, // 124-131 (JJMMAAAA)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nb_seances: String, // 132-133
 
     // Compteurs (lus en clair pour calculer la partie variable)
     pub nb_da: usize,  // 134-135
@@ -81,45 +90,67 @@ pub struct Rss {
     pub nb_za: usize,  // 138-140
 
     // Diagnostics principaux
-    pub dp: String,                  // 141-148 (CIM-10)
-    pub dr: String,                  // 149-156 (CIM-10)
-    pub igs2: String,                // 157-159
+    pub dp: String, // 141-148 (CIM-10)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub dr: String, // 149-156 (CIM-10)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub igs2: String, // 157-159
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub confirmation_codage: String, // 160
 
     // Radiothérapie
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub type_machine_rt: String, // 161
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub type_dosimetrie: String, // 162
-    pub num_innovation: String,  // 163-177
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub num_innovation: String, // 163-177
 
     // Prise en charge
-    pub conversion_hc: String,        // 178
-    pub raac: String,                 // 179
-    pub contexte_patient: String,     // 180
-    pub admin_produit_rh: String,     // 181
-    pub rescrit_tarifaire: String,    // 182
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub conversion_hc: String, // 178
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub raac: String, // 179
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub contexte_patient: String, // 180
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub admin_produit_rh: String, // 181
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub rescrit_tarifaire: String, // 182
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub cat_nb_interventions: String, // 183
-    pub non_programme: String,        // 184
-    pub passage_urgences: String,     // 185
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub non_programme: String, // 184
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub passage_urgences: String, // 185
 
     // Partie variable
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics_associes: Vec<String>, // nDA × 8 chars (CIM-10)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics_documentaires: Vec<String>, // nDAD × 8 chars (CIM-10)
-    pub actes: Vec<ActeCcam>,              // nZA × 29 chars
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actes: Vec<ActeCcam>, // nZA × 29 chars
 }
 
 /// Zone d'acte CCAM (29 caractères dans le RSS groupé)
 #[derive(Debug, Serialize)]
 pub struct ActeCcam {
-    pub date_realisation: String,           // 8  (JJMMAAAA)
-    pub code_ccam: String,                  // 7
-    pub extension_pmsi: String,             // 3
-    pub phase: String,                      // 1
-    pub activite: String,                   // 1
-    pub extension_documentaire: String,     // 1
-    pub modificateurs: String,              // 4
+    pub date_realisation: String, // 8  (JJMMAAAA)
+    pub code_ccam: String,        // 7
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub extension_pmsi: String, // 3
+    pub phase: String,            // 1
+    pub activite: String,         // 1
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub extension_documentaire: String, // 1
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub modificateurs: String, // 4
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub remboursement_exceptionnel: String, // 1
-    pub association_non_prevue: String,     // 1
-    pub nb_realisations: String,            // 2
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub association_non_prevue: String, // 1
+    pub nb_realisations: String,  // 2
 }
 
 // ─── I/O ───────────────────────────────────────────────────────────────────

@@ -1,3 +1,5 @@
+// Copyright © 2025 William Gacquer — tous droits réservés
+
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
