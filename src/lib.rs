@@ -30,11 +30,20 @@ pub struct ParseError {
     pub message: String,
 }
 
-// ─── RSS groupé format 122 ─────────────────────────────────────────────────
+// ─── RSS groupé — formats 120 / 121 / 122 ─────────────────────────────────
 //
-// Référence : ATIH « Formats PMSI 2025 » – onglet « RSS groupé format 122 »
-// Taille fixe : 192 caractères + (8×nDA) + (8×nDAD) + (29×nZA)
-// Source : https://www.atih.sante.fr/formats-pmsi-2025-0
+// Référence : ATIH « Formats PMSI MCO »
+//   format 120 → 2021  https://www.atih.sante.fr/formats-pmsi-2021
+//   format 121 → 2022  https://www.atih.sante.fr/formats-pmsi-2022
+//   format 122 → 2023/2024/2025  https://www.atih.sante.fr/formats-pmsi-2025-0
+//
+// Taille fixe (en-tête) : 192 caractères pour toutes les versions
+// Partie variable       : (8×nDA) + (8×nDAD) + (29×nZA)
+//
+// Différences entre versions (positions 1-183 identiques) :
+//   format 120 : 184-189 = filler  →  pas de non_programme, pas de passage_urgences
+//   format 121 : 184 = non_programme, 185-189 = filler  →  pas de passage_urgences
+//   format 122 : 184 = non_programme, 185 = passage_urgences, 186-189 = filler
 
 #[derive(Debug, Serialize)]
 pub struct Rss {
@@ -262,9 +271,9 @@ fn parse_file(path: &Path) -> Result<FileResult> {
     })
 }
 
-// ─── RSS groupé format 122 parser ──────────────────────────────────────────
+// ─── Parser multi-format ───────────────────────────────────────────────────
 
-/// Longueur minimale d'une ligne : 192 caractères de tête fixe
+/// Longueur fixe de l'en-tête, identique pour tous les formats.
 const FIXED_LEN: usize = 192;
 
 fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
@@ -288,6 +297,20 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
             .to_string()
     };
 
+    // La version du format est à la position 10-12 de chaque ligne.
+    // Elle détermine quels champs sont présents aux positions 184-185.
+    let version_format_rss = f(10, 3);
+    let (non_programme, passage_urgences) = match version_format_rss.as_str() {
+        "120" => (String::new(), String::new()), // 2021 : filler aux pos 184-189
+        "121" => (f(184, 1), String::new()),     // 2022 : non_programmé à 184, filler 185-189
+        "122" => (f(184, 1), f(185, 1)),         // 2023-2025 : non_programmé + passage_urgences
+        other => bail!(
+            "ligne {} : version_format_rss inconnue « {} » (versions supportées : 120, 121, 122)",
+            line_num,
+            other
+        ),
+    };
+
     let nb_da: usize = f(134, 2).parse().unwrap_or(0);
     let nb_dad: usize = f(136, 2).parse().unwrap_or(0);
     let nb_za: usize = f(138, 3).parse().unwrap_or(0);
@@ -305,7 +328,7 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         );
     }
 
-    // Lecture de la partie variable
+    // Lecture de la partie variable (identique pour tous les formats)
     let mut pos = FIXED_LEN;
 
     let mut diagnostics_associes = Vec::with_capacity(nb_da);
@@ -360,7 +383,7 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         version_classification: f(1, 2),
         cmd: f(3, 2),
         ghm: f(5, 4),
-        version_format_rss: f(10, 3),
+        version_format_rss,
         code_retour_groupage: f(13, 3),
         finess: f(16, 9),
         version_format_rum: f(25, 3),
@@ -398,8 +421,8 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         admin_produit_rh: f(181, 1),
         rescrit_tarifaire: f(182, 1),
         cat_nb_interventions: f(183, 1),
-        non_programme: f(184, 1),
-        passage_urgences: f(185, 1),
+        non_programme,
+        passage_urgences,
         diagnostics_associes,
         diagnostics_documentaires,
         actes,
@@ -424,8 +447,17 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    /// Construit une ligne RSS groupé format 122 valide pour les tests.
-    fn make_rss_line(nb_da: usize, nb_dad: usize, nb_za: usize) -> String {
+    /// Construit une ligne RSS groupé valide pour les tests.
+    /// `fmt` : version du format ("120", "121" ou "122")
+    /// `non_prog` / `passage_urg` : valeur à écrire aux positions 184 / 185
+    fn make_rss_line_fmt(
+        fmt: &str,
+        nb_da: usize,
+        nb_dad: usize,
+        nb_za: usize,
+        non_prog: char,
+        passage_urg: char,
+    ) -> String {
         let mut line = vec![' '; FIXED_LEN];
 
         // version_classification (1-2)
@@ -440,9 +472,13 @@ mod tests {
         line[6] = 'M';
         line[7] = '1';
         // version_format_rss (10-12)
-        line[9] = '1';
-        line[10] = '2';
-        line[11] = '2';
+        let fmt_bytes: Vec<char> = fmt.chars().collect();
+        line[9] = fmt_bytes[0];
+        line[10] = fmt_bytes[1];
+        line[11] = fmt_bytes[2];
+        // non_programme (184) et passage_urgences (185)
+        line[183] = non_prog;
+        line[184] = passage_urg;
         // code_retour_groupage (13-15)
         line[12] = '0';
         line[13] = '0';
@@ -529,6 +565,10 @@ mod tests {
         result
     }
 
+    fn make_rss_line(nb_da: usize, nb_dad: usize, nb_za: usize) -> String {
+        make_rss_line_fmt("122", nb_da, nb_dad, nb_za, '1', '5')
+    }
+
     #[test]
     fn parses_rss_sans_partie_variable() {
         let line = make_rss_line(0, 0, 0);
@@ -581,5 +621,101 @@ mod tests {
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, grp_path.display().to_string());
         assert_eq!(result.files[0].record_count, 1);
+    }
+
+    // ── Tests multi-format ──────────────────────────────────────────────────
+
+    #[test]
+    fn format_120_sans_non_programme_ni_passage_urgences() {
+        // Format 120 (2021) : positions 184-185 sont du filler, non_programme et
+        // passage_urgences doivent être absents du résultat (chaînes vides).
+        let line = make_rss_line_fmt("120", 0, 0, 0, '1', '5');
+        let chars: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars, 1).expect("parse format 120");
+
+        assert_eq!(rss.version_format_rss, "120");
+        assert!(
+            rss.non_programme.is_empty(),
+            "non_programme doit être vide en format 120"
+        );
+        assert!(
+            rss.passage_urgences.is_empty(),
+            "passage_urgences doit être vide en format 120"
+        );
+    }
+
+    #[test]
+    fn format_121_avec_non_programme_sans_passage_urgences() {
+        // Format 121 (2022) : position 184 = non_programme, 185 = filler.
+        let line = make_rss_line_fmt("121", 0, 0, 0, '1', ' ');
+        let chars: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars, 1).expect("parse format 121");
+
+        assert_eq!(rss.version_format_rss, "121");
+        assert_eq!(
+            rss.non_programme, "1",
+            "non_programme doit être '1' en format 121"
+        );
+        assert!(
+            rss.passage_urgences.is_empty(),
+            "passage_urgences doit être vide en format 121"
+        );
+    }
+
+    #[test]
+    fn format_122_avec_non_programme_et_passage_urgences() {
+        // Format 122 (2023-2025) : 184 = non_programme, 185 = passage_urgences.
+        let line = make_rss_line_fmt("122", 0, 0, 0, '1', '5');
+        let chars: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars, 1).expect("parse format 122");
+
+        assert_eq!(rss.version_format_rss, "122");
+        assert_eq!(rss.non_programme, "1");
+        assert_eq!(rss.passage_urgences, "5");
+    }
+
+    #[test]
+    fn rejette_version_format_inconnue() {
+        let line = make_rss_line_fmt("123", 0, 0, 0, ' ', ' ');
+        let chars: Vec<char> = line.chars().collect();
+        let err = parse_rss(&chars, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("version_format_rss inconnue"),
+            "message d'erreur inattendu: {err}"
+        );
+    }
+
+    #[test]
+    fn fichier_multi_format_trois_versions() {
+        // Un fichier contenant des lignes de trois formats différents (120, 121, 122)
+        // doit parser correctement chaque ligne selon sa version.
+        let dir = tempdir().expect("tempdir");
+        let grp_path = dir.path().join("mix.grp");
+
+        let line120 = make_rss_line_fmt("120", 0, 0, 0, ' ', ' ');
+        let line121 = make_rss_line_fmt("121", 0, 0, 0, '1', ' ');
+        let line122 = make_rss_line_fmt("122", 0, 0, 0, '1', '5');
+        let content = format!("{line120}\n{line121}\n{line122}\n");
+        fs::write(&grp_path, &content).expect("write grp");
+
+        let result = convert_path(&grp_path).expect("convert multi-format");
+        assert_eq!(result.files[0].record_count, 3);
+        assert_eq!(result.files[0].errors.len(), 0);
+
+        let r0 = &result.files[0].records[0];
+        let r1 = &result.files[0].records[1];
+        let r2 = &result.files[0].records[2];
+
+        assert_eq!(r0.version_format_rss, "120");
+        assert!(r0.non_programme.is_empty());
+        assert!(r0.passage_urgences.is_empty());
+
+        assert_eq!(r1.version_format_rss, "121");
+        assert_eq!(r1.non_programme, "1");
+        assert!(r1.passage_urgences.is_empty());
+
+        assert_eq!(r2.version_format_rss, "122");
+        assert_eq!(r2.non_programme, "1");
+        assert_eq!(r2.passage_urgences, "5");
     }
 }
