@@ -30,20 +30,32 @@ pub struct ParseError {
     pub message: String,
 }
 
-// ─── RSS groupé — formats 120 / 121 / 122 ─────────────────────────────────
+// ─── RSS groupé — formats 116 à 122 ─────────────────────────────────────
 //
 // Référence : ATIH « Formats PMSI MCO »
-//   format 120 → 2021  https://www.atih.sante.fr/formats-pmsi-2021
-//   format 121 → 2022  https://www.atih.sante.fr/formats-pmsi-2022
-//   format 122 → 2023/2024/2025  https://www.atih.sante.fr/formats-pmsi-2025-0
+//   format 116 → 2013-2015  (document du 19/12/2012)
+//   format 117 → 2016       https://www.atih.sante.fr/node/2833
+//   format 118 → 2017-2018  https://www.atih.sante.fr/node/3050
+//   format 119 → 2019       https://www.atih.sante.fr/formats-pmsi-2019
+//   format 120 → 2020-2021  https://www.atih.sante.fr/formats-pmsi-2021
+//   format 121 → 2022       https://www.atih.sante.fr/formats-pmsi-2022
+//   format 122 → 2023-2025  https://www.atih.sante.fr/formats-pmsi-2025-0
 //
-// Taille fixe (en-tête) : 192 caractères pour toutes les versions
-// Partie variable       : (8×nDA) + (8×nDAD) + (29×nZA)
+// Taille fixe (en-tête) : 192 caractères pour tous les formats supportés.
+// Zone d'acte CCAM (ZA) : 26 chars en format 116 (sans extension_pmsi) ;
+//                          29 chars en formats 117-122.
+// Partie variable        : (8×nDA) + (8×nDAD) + (za_len×nZA)
 //
-// Différences entre versions (positions 1-183 identiques) :
-//   format 120 : 184-189 = filler  →  pas de non_programme, pas de passage_urgences
-//   format 121 : 184 = non_programme, 185-189 = filler  →  pas de passage_urgences
-//   format 122 : 184 = non_programme, 185 = passage_urgences, 186-189 = filler
+// Évolution des champs en fin d'en-tête (positions 163-192) :
+//   fmt 116 : 163-177=innovation, 178-192=zone_réservée(15)
+//   fmt 117 : 163-177=innovation, 178-179=nb_ivg, 180-183=annee_ivg,
+//             184-187=filler, 188-189=naissances_vivantes, 190-192=zone_rés.
+//   fmt 118 : 163-177=innovation, 178-189=filler(12), 190-192=zone_réservée
+//   fmt 119 : 163-177=innovation, 178=conv_hc, 179=raac, 180-189=filler
+//   fmt 120 : …119… + 180=contexte_patient, 181=admin_produit_rh,
+//             182=rescrit_tarifaire, 183=cat_nb_interventions, 184-189=filler
+//   fmt 121 : …120… + 184=non_programme, 185-189=filler
+//   fmt 122 : …121… + 185=passage_urgences, 186-189=filler
 
 #[derive(Debug, Serialize)]
 pub struct Rss {
@@ -115,7 +127,15 @@ pub struct Rss {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub num_innovation: String, // 163-177
 
-    // Prise en charge
+    // Obstétrique — format 117 uniquement
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nb_ivg_anterieures: String, // 178-179
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub annee_ivg_precedente: String, // 180-183
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub nb_naissances_vivantes: String, // 188-189
+
+    // Prise en charge — formats 119+
     #[serde(skip_serializing_if = "String::is_empty")]
     pub conversion_hc: String, // 178
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -273,6 +293,27 @@ fn parse_file(path: &Path) -> Result<FileResult> {
 
 // ─── Parser multi-format ───────────────────────────────────────────────────
 
+/// Champs dont la présence et la signification varient selon la version du format.
+#[derive(Default)]
+struct VersionFields {
+    // Format 117 uniquement
+    nb_ivg_anterieures: String,
+    annee_ivg_precedente: String,
+    nb_naissances_vivantes: String,
+    // Formats 119+
+    conversion_hc: String,
+    raac: String,
+    // Formats 120+
+    contexte_patient: String,
+    admin_produit_rh: String,
+    rescrit_tarifaire: String,
+    cat_nb_interventions: String,
+    // Formats 121+
+    non_programme: String,
+    // Formats 122+
+    passage_urgences: String,
+}
+
 /// Longueur fixe de l'en-tête, identique pour tous les formats.
 const FIXED_LEN: usize = 192;
 
@@ -298,14 +339,73 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
     };
 
     // La version du format est à la position 10-12 de chaque ligne.
-    // Elle détermine quels champs sont présents aux positions 184-185.
+    // Elle détermine la taille des ZA et les champs spécifiques en 178-189.
     let version_format_rss = f(10, 3);
-    let (non_programme, passage_urgences) = match version_format_rss.as_str() {
-        "120" => (String::new(), String::new()), // 2021 : filler aux pos 184-189
-        "121" => (f(184, 1), String::new()),     // 2022 : non_programmé à 184, filler 185-189
-        "122" => (f(184, 1), f(185, 1)),         // 2023-2025 : non_programmé + passage_urgences
+    let (za_len, vf): (usize, VersionFields) = match version_format_rss.as_str() {
+        "116" | "118" => (
+            if version_format_rss == "116" { 26 } else { 29 },
+            VersionFields::default(),
+        ),
+        "117" => (
+            29,
+            VersionFields {
+                nb_ivg_anterieures: f(178, 2),
+                annee_ivg_precedente: f(180, 4),
+                nb_naissances_vivantes: f(188, 2),
+                ..Default::default()
+            },
+        ),
+        "119" => (
+            29,
+            VersionFields {
+                conversion_hc: f(178, 1),
+                raac: f(179, 1),
+                ..Default::default()
+            },
+        ),
+        "120" => (
+            29,
+            VersionFields {
+                conversion_hc: f(178, 1),
+                raac: f(179, 1),
+                contexte_patient: f(180, 1),
+                admin_produit_rh: f(181, 1),
+                rescrit_tarifaire: f(182, 1),
+                cat_nb_interventions: f(183, 1),
+                ..Default::default()
+            },
+        ),
+        "121" => (
+            29,
+            VersionFields {
+                conversion_hc: f(178, 1),
+                raac: f(179, 1),
+                contexte_patient: f(180, 1),
+                admin_produit_rh: f(181, 1),
+                rescrit_tarifaire: f(182, 1),
+                cat_nb_interventions: f(183, 1),
+                non_programme: f(184, 1),
+                ..Default::default()
+            },
+        ),
+        "122" => (
+            29,
+            VersionFields {
+                conversion_hc: f(178, 1),
+                raac: f(179, 1),
+                contexte_patient: f(180, 1),
+                admin_produit_rh: f(181, 1),
+                rescrit_tarifaire: f(182, 1),
+                cat_nb_interventions: f(183, 1),
+                non_programme: f(184, 1),
+                passage_urgences: f(185, 1),
+                ..Default::default()
+            },
+        ),
         other => bail!(
-            "ligne {} : version_format_rss inconnue « {} » (versions supportées : 120, 121, 122)",
+            "ligne {} : version_format_rss inconnue « {} » \
+             (formats supportés : 116 à 122 ; les formats antérieurs à 2013 \
+             ne sont pas encore pris en charge)",
             line_num,
             other
         ),
@@ -315,7 +415,7 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
     let nb_dad: usize = f(136, 2).parse().unwrap_or(0);
     let nb_za: usize = f(138, 3).parse().unwrap_or(0);
 
-    let expected_len = FIXED_LEN + nb_da * 8 + nb_dad * 8 + nb_za * 29;
+    let expected_len = FIXED_LEN + nb_da * 8 + nb_dad * 8 + nb_za * za_len;
     if chars.len() < expected_len {
         bail!(
             "ligne {} : trop courte pour la partie variable ({} < {}; nDA={}, nDAD={}, nZA={})",
@@ -328,7 +428,7 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         );
     }
 
-    // Lecture de la partie variable (identique pour tous les formats)
+    // Lecture de la partie variable
     let mut pos = FIXED_LEN;
 
     let mut diagnostics_associes = Vec::with_capacity(nb_da);
@@ -353,9 +453,11 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         pos += 8;
     }
 
+    // Zone d'acte CCAM : 26 chars en format 116 (sans extension_pmsi),
+    //                     29 chars en formats 117-122.
     let mut actes = Vec::with_capacity(nb_za);
     for _ in 0..nb_za {
-        let z = &chars[pos..pos + 29];
+        let z = &chars[pos..pos + za_len];
         let fz = |start: usize, len: usize| -> String {
             z[start..start + len]
                 .iter()
@@ -363,19 +465,34 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
                 .trim()
                 .to_string()
         };
-        actes.push(ActeCcam {
-            date_realisation: fz(0, 8),
-            code_ccam: fz(8, 7),
-            extension_pmsi: fz(15, 3),
-            phase: fz(18, 1),
-            activite: fz(19, 1),
-            extension_documentaire: fz(20, 1),
-            modificateurs: fz(21, 4),
-            remboursement_exceptionnel: fz(25, 1),
-            association_non_prevue: fz(26, 1),
-            nb_realisations: fz(27, 2),
+        actes.push(if za_len == 26 {
+            ActeCcam {
+                date_realisation: fz(0, 8),
+                code_ccam: fz(8, 7),
+                extension_pmsi: String::new(),
+                phase: fz(15, 1),
+                activite: fz(16, 1),
+                extension_documentaire: fz(17, 1),
+                modificateurs: fz(18, 4),
+                remboursement_exceptionnel: fz(22, 1),
+                association_non_prevue: fz(23, 1),
+                nb_realisations: fz(24, 2),
+            }
+        } else {
+            ActeCcam {
+                date_realisation: fz(0, 8),
+                code_ccam: fz(8, 7),
+                extension_pmsi: fz(15, 3),
+                phase: fz(18, 1),
+                activite: fz(19, 1),
+                extension_documentaire: fz(20, 1),
+                modificateurs: fz(21, 4),
+                remboursement_exceptionnel: fz(25, 1),
+                association_non_prevue: fz(26, 1),
+                nb_realisations: fz(27, 2),
+            }
         });
-        pos += 29;
+        pos += za_len;
     }
 
     Ok(Rss {
@@ -415,14 +532,17 @@ fn parse_rss(chars: &[char], line_num: usize) -> Result<Rss> {
         type_machine_rt: f(161, 1),
         type_dosimetrie: f(162, 1),
         num_innovation: f(163, 15),
-        conversion_hc: f(178, 1),
-        raac: f(179, 1),
-        contexte_patient: f(180, 1),
-        admin_produit_rh: f(181, 1),
-        rescrit_tarifaire: f(182, 1),
-        cat_nb_interventions: f(183, 1),
-        non_programme,
-        passage_urgences,
+        nb_ivg_anterieures: vf.nb_ivg_anterieures,
+        annee_ivg_precedente: vf.annee_ivg_precedente,
+        nb_naissances_vivantes: vf.nb_naissances_vivantes,
+        conversion_hc: vf.conversion_hc,
+        raac: vf.raac,
+        contexte_patient: vf.contexte_patient,
+        admin_produit_rh: vf.admin_produit_rh,
+        rescrit_tarifaire: vf.rescrit_tarifaire,
+        cat_nb_interventions: vf.cat_nb_interventions,
+        non_programme: vf.non_programme,
+        passage_urgences: vf.passage_urgences,
         diagnostics_associes,
         diagnostics_documentaires,
         actes,
@@ -548,11 +668,13 @@ mod tests {
         for i in 0..nb_dad {
             result.push_str(&format!("Z96.65{:02}", i));
         }
-        // Zones d'actes (29 chars)
+        // Zones d'actes : 26 chars en format 116, 29 chars sinon
         for _ in 0..nb_za {
             result.push_str("01012024"); // date (8)
             result.push_str("ZBQK002"); // code CCAM (7)
-            result.push_str("   "); // extension PMSI (3)
+            if fmt != "116" {
+                result.push_str("   "); // extension PMSI (3) — absent en format 116
+            }
             result.push('0'); // phase (1)
             result.push('1'); // activite (1)
             result.push(' '); // ext documentaire (1)
@@ -676,13 +798,113 @@ mod tests {
 
     #[test]
     fn rejette_version_format_inconnue() {
-        let line = make_rss_line_fmt("123", 0, 0, 0, ' ', ' ');
+        // Formats > 122 (trop récent) ou < 116 (trop ancien) sont rejetés.
+        for bad_fmt in ["123", "115", "099"] {
+            let line = make_rss_line_fmt(bad_fmt, 0, 0, 0, ' ', ' ');
+            let chars: Vec<char> = line.chars().collect();
+            let err = parse_rss(&chars, 1).unwrap_err();
+            assert!(
+                err.to_string().contains("version_format_rss inconnue"),
+                "message d'erreur inattendu pour fmt={bad_fmt}: {err}"
+            );
+        }
+    }
+
+    // ── Tests formats 116-119 ───────────────────────────────────────────────
+
+    #[test]
+    fn format_116_parse_sans_erreur_champs_vides() {
+        // Format 116 (2013-2015) : pos 178-192 = zone_réservée, tous les champs
+        // spécifiques aux formats postérieurs doivent être vides.
+        let line = make_rss_line_fmt("116", 0, 0, 0, ' ', ' ');
         let chars: Vec<char> = line.chars().collect();
-        let err = parse_rss(&chars, 1).unwrap_err();
-        assert!(
-            err.to_string().contains("version_format_rss inconnue"),
-            "message d'erreur inattendu: {err}"
-        );
+        let rss = parse_rss(&chars, 1).expect("parse format 116");
+
+        assert_eq!(rss.version_format_rss, "116");
+        assert!(rss.nb_ivg_anterieures.is_empty());
+        assert!(rss.annee_ivg_precedente.is_empty());
+        assert!(rss.nb_naissances_vivantes.is_empty());
+        assert!(rss.conversion_hc.is_empty());
+        assert!(rss.raac.is_empty());
+        assert!(rss.non_programme.is_empty());
+        assert!(rss.passage_urgences.is_empty());
+    }
+
+    #[test]
+    fn format_116_acte_ccam_26_chars() {
+        // Format 116 : la ZA fait 26 chars (pas d'extension_pmsi).
+        // L'acte doit être parsé correctement, extension_pmsi reste vide.
+        let line = make_rss_line_fmt("116", 0, 0, 1, ' ', ' ');
+        let chars: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars, 1).expect("parse format 116 avec ZA");
+
+        assert_eq!(rss.actes.len(), 1);
+        assert_eq!(rss.actes[0].code_ccam, "ZBQK002");
+        assert_eq!(rss.actes[0].activite, "1");
+        assert_eq!(rss.actes[0].nb_realisations, "01");
+        assert!(rss.actes[0].extension_pmsi.is_empty(), "extension_pmsi absent en fmt 116");
+    }
+
+    #[test]
+    fn format_117_champs_ivg() {
+        // Format 117 (2016) : nb_ivg et annee_ivg aux positions 178-183.
+        // On construit une ligne avec des valeurs fictives à ces positions.
+        let mut line = make_rss_line_fmt("117", 0, 0, 0, ' ', ' ');
+        // Positions 178-179 (0-indexed: 177-178) = nb_ivg_anterieures
+        let mut chars: Vec<char> = line.chars().collect();
+        chars[177] = '0';
+        chars[178] = '2'; // nb_ivg = "02"
+        // Positions 180-183 (0-indexed: 179-182) = annee_ivg_precedente
+        chars[179] = '2';
+        chars[180] = '0';
+        chars[181] = '1';
+        chars[182] = '5'; // annee = "2015"
+        // Positions 188-189 (0-indexed: 187-188) = nb_naissances_vivantes
+        chars[187] = '0';
+        chars[188] = '3'; // naissances = "03"
+        line = chars.into_iter().collect();
+
+        let chars2: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars2, 1).expect("parse format 117");
+
+        assert_eq!(rss.version_format_rss, "117");
+        assert_eq!(rss.nb_ivg_anterieures, "02");
+        assert_eq!(rss.annee_ivg_precedente, "2015");
+        assert_eq!(rss.nb_naissances_vivantes, "03");
+        assert!(rss.conversion_hc.is_empty(), "conversion_hc absent en fmt 117");
+        assert!(rss.raac.is_empty(), "raac absent en fmt 117");
+    }
+
+    #[test]
+    fn format_118_parse_sans_champs_specifiques() {
+        // Format 118 (2017-2018) : pos 178-189 = filler, tous vides.
+        let line = make_rss_line_fmt("118", 0, 0, 0, ' ', ' ');
+        let chars: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars, 1).expect("parse format 118");
+
+        assert_eq!(rss.version_format_rss, "118");
+        assert!(rss.nb_ivg_anterieures.is_empty());
+        assert!(rss.conversion_hc.is_empty());
+        assert!(rss.non_programme.is_empty());
+    }
+
+    #[test]
+    fn format_119_conversion_hc_et_raac() {
+        // Format 119 (2019) : pos 178 = conversion_hc, 179 = raac.
+        let mut line = make_rss_line_fmt("119", 0, 0, 0, ' ', ' ');
+        let mut chars: Vec<char> = line.chars().collect();
+        chars[177] = '1'; // conversion_hc = '1'
+        chars[178] = '1'; // raac = '1'
+        line = chars.into_iter().collect();
+
+        let chars2: Vec<char> = line.chars().collect();
+        let rss = parse_rss(&chars2, 1).expect("parse format 119");
+
+        assert_eq!(rss.version_format_rss, "119");
+        assert_eq!(rss.conversion_hc, "1");
+        assert_eq!(rss.raac, "1");
+        assert!(rss.contexte_patient.is_empty(), "contexte_patient absent en fmt 119");
+        assert!(rss.non_programme.is_empty());
     }
 
     #[test]
