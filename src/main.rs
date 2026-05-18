@@ -15,12 +15,20 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Pretty-print JSON output
-    #[arg(long)]
+    #[arg(long, conflicts_with = "lines")]
     pretty: bool,
+
+    /// One compact JSON object per input line (NDJSON), incompatible with --pretty
+    #[arg(long)]
+    lines: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let result = pmsi2json::convert_path(&args.input)?;
-    pmsi2json::write_json(&result, args.output.as_deref(), args.pretty)
+    if args.lines {
+        pmsi2json::write_json_lines(&result, args.output.as_deref())
+    } else {
+        pmsi2json::write_json(&result, args.output.as_deref(), args.pretty)
+    }
 }

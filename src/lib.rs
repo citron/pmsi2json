@@ -213,6 +213,25 @@ pub fn write_json(result: &ConversionResult, output: Option<&Path>, pretty: bool
     Ok(())
 }
 
+/// Écrit un objet JSON compact par enregistrement RSS, un par ligne (format NDJSON).
+pub fn write_json_lines(result: &ConversionResult, output: Option<&Path>) -> Result<()> {
+    let mut out = String::new();
+    for file in &result.files {
+        for record in &file.records {
+            out.push_str(&serde_json::to_string(record)?);
+            out.push('\n');
+        }
+    }
+
+    if let Some(path) = output {
+        fs::write(path, &out).with_context(|| format!("failed to write {}", path.display()))?;
+    } else {
+        print!("{out}");
+    }
+
+    Ok(())
+}
+
 // ─── File collection ───────────────────────────────────────────────────────
 
 fn collect_grp_files(input: &Path) -> Result<Vec<PathBuf>> {
@@ -939,5 +958,30 @@ mod tests {
         assert_eq!(r2.version_format_rss, "122");
         assert_eq!(r2.non_programme, "1");
         assert_eq!(r2.passage_urgences, "5");
+    }
+
+    #[test]
+    fn write_json_lines_produit_une_ligne_par_rss() {
+        let dir = tempdir().expect("tempdir");
+        let grp_path = dir.path().join("test.grp");
+        let out_path = dir.path().join("out.ndjson");
+
+        let line1 = make_rss_line_fmt("122", 0, 0, 0, '1', '5');
+        let line2 = make_rss_line_fmt("122", 0, 0, 0, '0', '3');
+        fs::write(&grp_path, format!("{line1}\n{line2}\n")).expect("write grp");
+
+        let result = convert_path(&grp_path).expect("convert");
+        write_json_lines(&result, Some(&out_path)).expect("write lines");
+
+        let content = fs::read_to_string(&out_path).expect("read output");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "doit produire exactement 2 lignes");
+
+        // chaque ligne est du JSON valide dont la clef version_format_rss vaut "122"
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line)
+                .expect("chaque ligne doit être du JSON valide");
+            assert_eq!(v["version_format_rss"], "122");
+        }
     }
 }
