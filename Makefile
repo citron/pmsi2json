@@ -6,7 +6,8 @@ DESTDIR := /usr/local/bin
 build:
 	cargo build --release
 
-install: build
+# Lance d abord  make build  sans sudo, puis  sudo make install
+install:
 	install -o root -g root -m 755 target/release/$(BINARY) $(DESTDIR)/$(BINARY)
 
 uninstall:
